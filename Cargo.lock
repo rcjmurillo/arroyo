@@ -758,6 +758,7 @@ dependencies = [
  "rand",
  "test-case",
  "tokio",
+ "tonic",
  "tracing",
 ]
 

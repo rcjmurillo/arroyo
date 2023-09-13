@@ -1,9 +1,71 @@
-//use crate::parquet::ParquetBackend;
-use crate::{BackingStore, StateBackend};
+use crate::{hash_key, BackingStore, DataOperation, StateBackend, FULL_KEY_RANGE};
 use arroyo_rpc::grpc::{CheckpointMetadata, TableDescriptor, TableType};
 use arroyo_types::{from_micros, Data, Key, TaskInfo};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, SystemTime};
+
+pub enum Compactor {
+    TimeKeyMap,
+    TimeKeyMultiMap,
+}
+
+pub struct BlindTuple {
+    pub key_hash: u64,
+    pub timestamp: SystemTime,
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+    pub operation: DataOperation,
+}
+
+impl Compactor {
+    pub(crate) fn for_table_type(table_type: TableType) -> Self {
+        match table_type {
+            TableType::Global | TableType::TimeKeyMap => Compactor::TimeKeyMap,
+            TableType::KeyTimeMultiMap => Compactor::TimeKeyMultiMap,
+        }
+    }
+
+    pub(crate) fn compact_tuples(&self, tuples: Vec<BlindTuple>) -> Vec<BlindTuple> {
+        let mut result = vec![];
+        match self {
+            Compactor::TimeKeyMap => {
+                let mut data: BTreeMap<SystemTime, HashMap<Vec<u8>, Vec<u8>>> = BTreeMap::new();
+
+                // insert tuples into data
+                for tuple in tuples {
+                    match tuple.operation {
+                        DataOperation::Insert => {
+                            data.entry(tuple.timestamp)
+                                .or_default()
+                                .insert(tuple.key, tuple.value);
+                        }
+                        DataOperation::DeleteKey => {
+                            data.entry(tuple.timestamp).or_default().remove(&tuple.key);
+                        }
+                    }
+                }
+
+                // flatten data back into tuples
+                for (timestamp, map) in data {
+                    for (key, value) in map {
+                        result.push(BlindTuple {
+                            key_hash: hash_key(&key),
+                            timestamp,
+                            key,
+                            value,
+                            operation: DataOperation::Insert,
+                        });
+                    }
+                }
+            }
+            Compactor::TimeKeyMultiMap => {
+                // TODO: implement compaction
+                result = tuples;
+            }
+        }
+        result
+    }
+}
 
 pub struct TimeKeyMap<'a, K: Key, V: Data, S: BackingStore> {
     table: char,
@@ -158,7 +220,7 @@ impl<'a, K: Key, V: Data + PartialEq, S: BackingStore> TimeKeyMap<'a, K, V, S> {
             let drained = values.drain();
             for (mut key, mut value) in drained {
                 self.store
-                    .write_data_triple(
+                    .write_data_tuple(
                         self.table,
                         TableType::TimeKeyMap,
                         time,
@@ -195,14 +257,21 @@ impl<K: Key, V: Data> TimeKeyMapCache<K, V> {
         let min_valid_time = watermark.map_or(SystemTime::UNIX_EPOCH, |watermark| {
             watermark - Duration::from_micros(table_descriptor.retention_micros)
         });
-        for (timestamp, key, value) in backing_store.get_data_triples(table).await {
+        for (timestamp, key, value, operation) in backing_store.get_data_tuples(table).await {
             if timestamp < min_valid_time {
                 continue;
             }
-            persisted_values
-                .entry(timestamp)
-                .or_default()
-                .insert(key, value);
+            match operation {
+                DataOperation::Insert => {
+                    persisted_values
+                        .entry(timestamp)
+                        .or_default()
+                        .insert(key, value.unwrap());
+                }
+                DataOperation::DeleteKey => {
+                    persisted_values.entry(timestamp).or_default().remove(&key);
+                }
+            }
         }
 
         Self {
@@ -240,7 +309,7 @@ impl<'a, K: Key, V: Data, S: BackingStore> KeyTimeMultiMap<'a, K, V, S> {
     }
     pub async fn insert(&mut self, timestamp: SystemTime, mut key: K, mut value: V) {
         self.backing_store
-            .write_data_triple(
+            .write_data_tuple(
                 self.table,
                 TableType::KeyTimeMultiMap,
                 timestamp,
@@ -289,8 +358,8 @@ impl<'a, K: Key, V: Data, S: BackingStore> KeyTimeMultiMap<'a, K, V, S> {
 }
 
 pub struct KeyTimeMultiMapCache<K: Key, V: Data> {
-    values: HashMap<K, BTreeMap<SystemTime, Vec<V>>>,
-    expirations: BTreeMap<SystemTime, HashSet<K>>,
+    pub(crate) values: HashMap<K, BTreeMap<SystemTime, Vec<V>>>,
+    pub(crate) expirations: BTreeMap<SystemTime, HashSet<K>>,
 }
 impl<K: Key, V: Data> KeyTimeMultiMapCache<K, V> {
     pub async fn from_checkpoint<S: BackingStore>(
@@ -316,16 +385,23 @@ impl<K: Key, V: Data> KeyTimeMultiMapCache<K, V> {
                 from_micros(min_watermark - table_descriptor.retention_micros)
             });
 
-        for (timestamp, key, value) in backing_store.get_data_triples(table).await {
+        for (timestamp, key, value, operation) in backing_store.get_data_tuples(table).await {
             if timestamp < min_valid_time {
                 continue;
             }
-            values
-                .entry(key)
-                .or_default()
-                .entry(timestamp)
-                .or_default()
-                .push(value);
+            match operation {
+                DataOperation::Insert => {
+                    values
+                        .entry(key)
+                        .or_default()
+                        .entry(timestamp)
+                        .or_default()
+                        .push(value.unwrap());
+                }
+                DataOperation::DeleteKey => {
+                    values.entry(key).or_default().remove(&timestamp);
+                }
+            }
         }
         let mut expirations: BTreeMap<SystemTime, HashSet<K>> = BTreeMap::new();
         for (time, key) in values.iter().map(|(key, map)| {
@@ -453,7 +529,7 @@ pub struct GlobalKeyedStateCache<K: Key, V: Data> {
 impl<K: Key, V: Data> GlobalKeyedStateCache<K, V> {
     pub async fn from_checkpoint<S: BackingStore>(backing_store: &S, table: char) -> Self {
         let mut values = HashMap::new();
-        for (key, value) in backing_store.get_global_key_values(table).await {
+        for (key, value) in backing_store.get_key_values(table, &FULL_KEY_RANGE).await {
             values.insert(key, value);
         }
         Self { values }
@@ -487,24 +563,23 @@ impl<'a, K: Key, V: Data, S: BackingStore> KeyedState<'a, K, V, S> {
         }
     }
 
-    pub async fn insert(&mut self, timestamp: SystemTime, mut key: K, value: V) {
-        let mut wrapped = Some(value);
+    pub async fn insert(&mut self, timestamp: SystemTime, mut key: K, mut value: V) {
         self.backing_state
-            .write_data_triple(
+            .write_data_tuple(
                 self.table,
                 TableType::TimeKeyMap,
                 timestamp,
                 &mut key,
-                &mut wrapped,
+                &mut value,
             )
             .await;
-        self.cache.insert(key, wrapped.unwrap());
+        self.cache.insert(key, value);
     }
 
     pub async fn remove(&mut self, key: &mut K) {
         self.cache.remove(&key);
         self.backing_state
-            .write_key_value::<K, Option<V>>(self.table, key, &mut None)
+            .delete_key_value::<K>(self.table, key)
             .await;
     }
 
@@ -520,11 +595,9 @@ pub struct KeyedStateCache<K: Key, V: Data> {
 impl<K: Key, V: Data> KeyedStateCache<K, V> {
     pub async fn from_checkpoint<S: BackingStore>(backing_store: &S, table: char) -> Self {
         let mut values = HashMap::new();
-        for (key, value) in backing_store.get_key_values(table).await {
-            match value {
-                Some(value) => values.insert(key, value),
-                None => values.remove(&key),
-            };
+        let key_range = &backing_store.task_info().key_range;
+        for (key, value) in backing_store.get_key_values(table, key_range).await {
+            values.insert(key, value);
         }
         Self { values }
     }
