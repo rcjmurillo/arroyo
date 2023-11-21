@@ -76,8 +76,8 @@ impl<K: Key, T: Data + Sync + SchemaData + Serialize, V: LocalWriter<T>>
             serde_json::from_str(config_str).expect("Invalid config for FileSystemSink");
         let table: FileSystemTable =
             serde_json::from_value(config.table).expect("Invalid table config for FileSystemSink");
-        let final_dir = match table.type_ {
-            TableType::Sink { ref path, .. } => path.clone(),
+        let final_dir = match table.table_type {
+            TableType::Sink { ref write_path, .. } => write_path.clone(),
             TableType::Source { .. } => {
                 unreachable!("shouldn't be using local writer for source");
             }
@@ -95,11 +95,11 @@ impl<
 {
     pub fn create_and_start(table: FileSystemTable) -> TwoPhaseCommitterOperator<K, T, Self> {
         let TableType::Sink {
-            path,
+            write_path,
             file_settings,
             format_settings: _,
             storage_options,
-        } = table.clone().type_
+        } = table.clone().table_type
         else {
             unreachable!("multi-part writer can only be used as sink");
         };
@@ -111,10 +111,11 @@ impl<
         };
         let partition_func = get_partitioner_from_file_settings(file_settings.unwrap());
         tokio::spawn(async move {
-            let storage_path: Path = StorageProvider::get_key(&path).unwrap().into();
-            let provider = StorageProvider::for_url_with_options(&path, storage_options.clone())
-                .await
-                .unwrap();
+            let storage_path: Path = StorageProvider::get_key(&write_path).unwrap().into();
+            let provider =
+                StorageProvider::for_url_with_options(&write_path, storage_options.clone())
+                    .await
+                    .unwrap();
             let mut writer = AsyncMultipartFileSystemWriter::<T, R>::new(
                 storage_path,
                 Arc::new(provider),
@@ -642,7 +643,7 @@ where
     ) -> Self {
         let file_settings = if let TableType::Sink {
             ref file_settings, ..
-        } = writer_properties.type_
+        } = writer_properties.table_type
         {
             file_settings.as_ref().unwrap()
         } else {

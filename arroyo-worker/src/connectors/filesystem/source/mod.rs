@@ -58,7 +58,7 @@ impl<K: Data, T: SchemaData> FileSystemSourceFunc<K, T> {
             .expect("Format must be set for filesystem source");
 
         Self {
-            table: table.type_,
+            table: table.table_type,
             deserializer: DataDeserializer::new(format, config.framing),
             file_states: HashMap::new(),
             _t: PhantomData,

@@ -49,7 +49,7 @@ impl<K: Key, D: Data + Sync + Serialize, V: LocalWriter<D>> LocalFileSystemWrite
 
         let TableType::Sink {
             ref file_settings, ..
-        } = table_properties.type_
+        } = table_properties.table_type
         else {
             unreachable!("LocalFileSystemWriter can only be used as a sink")
         };
