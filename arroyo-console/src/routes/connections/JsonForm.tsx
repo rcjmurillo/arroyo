@@ -349,9 +349,9 @@ export function MapWidget({
       <FormControl isRequired={true} isInvalid={pair.error != undefined}>
         <Flex gap={2} alignItems={'flex-end'}>
           <Flex gap={2} flex={1} alignItems={'center'} key={i}>
-            <Input value={pair.key} onChange={e => updateKeyValue(i, e.target.value, pair.value)} />
+            <Input id={i + "_key"} value={pair.key} onChange={e => updateKeyValue(i, e.target.value, pair.value)} />
             <Text>→</Text>
-            <Input value={pair.value} onChange={e => updateKeyValue(i, pair.key, e.target.value)} />
+            <Input id={i+"_value"} value={pair.value} onChange={e => updateKeyValue(i, pair.key, e.target.value)} />
           </Flex>
           <IconButton
             width={8}
