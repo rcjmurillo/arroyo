@@ -2,7 +2,7 @@
   "type": "object",
   "title": "FileSystemTable",
   "properties": {
-    "type": {
+    "tableType": {
       "type": "object",
       "title": "Table Type",
       "oneOf": [
@@ -47,7 +47,7 @@
           "type": "object",
           "title": "Sink",
           "properties": {
-            "path": {
+            "writePath": {
               "title": "Path",
               "type": "string",
               "description": "URI of the folder to write to"
@@ -184,13 +184,13 @@
             }
           },
           "required": [
-            "path"
+            "writePath"
           ]
         }
       ]
     }
   },
   "required": [
-    "type"
+    "tableType"
   ]
 }

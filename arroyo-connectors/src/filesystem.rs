@@ -68,7 +68,7 @@ impl Connector for FileSystemConnector {
     }
 
     fn table_type(&self, _: Self::ProfileT, table: Self::TableT) -> ConnectionType {
-        match table.type_ {
+        match table.table_type {
             TableType::Source { .. } => ConnectionType::Source,
             TableType::Sink { .. } => ConnectionType::Sink,
         }
@@ -82,14 +82,14 @@ impl Connector for FileSystemConnector {
         table: Self::TableT,
         schema: Option<&ConnectionSchema>,
     ) -> anyhow::Result<crate::Connection> {
-        let (description, operator, connection_type) = match table.type_ {
+        let (description, operator, connection_type) = match table.table_type {
             TableType::Source { .. } => (
                 "FileSystem".to_string(),
                 "connectors::filesystem::source::FileSystemSourceFunc",
                 ConnectionType::Source,
             ),
             TableType::Sink {
-                ref path,
+                ref write_path,
                 ref format_settings,
                 ref file_settings,
                 ..
@@ -103,7 +103,7 @@ impl Connector for FileSystemConnector {
                     bail!("commit_style must be Direct");
                 };
 
-                let backend_config = BackendConfig::parse_url(&path, true)?;
+                let backend_config = BackendConfig::parse_url(&write_path, true)?;
                 let is_local = match &backend_config {
                     BackendConfig::Local { .. } => true,
                     _ => false,
@@ -180,7 +180,7 @@ impl Connector for FileSystemConnector {
                     name,
                     EmptyConfig {},
                     FileSystemTable {
-                        type_: TableType::Source {
+                        table_type: TableType::Source {
                             path: storage_url,
                             storage_options,
                             compression_format: Some(compression_format),
@@ -302,10 +302,10 @@ pub fn file_system_sink_from_options(
         other => bail!("Unsupported format: {:?}", other),
     };
     Ok(FileSystemTable {
-        type_: TableType::Sink {
+        table_type: TableType::Sink {
             file_settings,
             format_settings,
-            path: storage_url,
+            write_path: storage_url,
             storage_options,
         },
     })
